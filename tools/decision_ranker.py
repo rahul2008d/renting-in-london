@@ -63,6 +63,32 @@ def _joined_text(prop: dict) -> str:
     return " ".join(parts).lower()
 
 
+# Duplicated from rightmove_search._has_no_parking to avoid circular imports.
+_NO_PARKING_PHRASES: tuple[str, ...] = (
+    "no parking",
+    "no off-street parking",
+    "no off street parking",
+    "no allocated parking",
+    "no private parking",
+    "no resident parking",
+    "no residents parking",
+    "no on-site parking",
+    "no onsite parking",
+    "no garage",
+    "no driveway",
+    "parking not available",
+    "parking not included",
+    "does not include parking",
+    "does not come with parking",
+    "without parking",
+    "excludes parking",
+)
+
+
+def _has_no_parking_text(text_blob: str) -> bool:
+    return any(phrase in text_blob for phrase in _NO_PARKING_PHRASES)
+
+
 def _fallback_mandatory_checks(prop: dict) -> dict[str, bool]:
     price = _to_int(prop.get("price_pcm"), 0)
     bedrooms = _to_int(prop.get("bedrooms"), 0)
@@ -71,17 +97,43 @@ def _fallback_mandatory_checks(prop: dict) -> dict[str, bool]:
 
     text_blob = _joined_text(prop)
 
-    parking_ok = any(term in text_blob for term in [
-        "parking", "garage", "driveway", "off street", "off-street",
-        "car port", "carport", "allocated parking", "allocated space",
-        "parking permit", "residents permit", "car space", "private parking",
-        "resident parking", "residents parking", "on-site parking",
-        "onsite parking", "visitor parking",
-    ])
+    if _has_no_parking_text(text_blob):
+        parking_ok = False
+    else:
+        parking_ok = any(
+            term in text_blob
+            for term in [
+                "parking",
+                "garage",
+                "driveway",
+                "off street",
+                "off-street",
+                "car port",
+                "carport",
+                "allocated parking",
+                "allocated space",
+                "parking permit",
+                "residents permit",
+                "car space",
+                "private parking",
+                "resident parking",
+                "residents parking",
+                "on-site parking",
+                "onsite parking",
+                "visitor parking",
+            ]
+        )
     furnished_ok = not re.search(r"(?<!or\s)(?<!/\s)unfurnished", text_blob)
     excluded_ok = not any(
         term in text_blob
-        for term in ["house share", "retirement", "student accommodation", "student accomodation"]
+        for term in [
+            "house share",
+            "house-share",
+            "retirement",
+            "student accommodation",
+            "student accomodation",
+            "student let",
+        ]
     ) and not bool(prop.get("students"))
 
     return {

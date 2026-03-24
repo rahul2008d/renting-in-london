@@ -204,7 +204,12 @@ def _extract_property(prop: dict) -> dict:
     property_images = (prop.get("propertyImages") or {}).get("images") or []
     text_blob = _collect_text_fields(prop)
     parking_signal = _has_parking(text_blob)
-    parking_status = "confirmed" if parking_signal else "unconfirmed"
+    if _has_no_parking(text_blob):
+        parking_status = "excluded"
+    elif parking_signal:
+        parking_status = "confirmed"
+    else:
+        parking_status = "unconfirmed"
     furnished_signal = _is_furnished(text_blob)
     excluded_type_signal = _is_excluded_type(prop, text_blob)
     amenity_tags = _extract_amenity_tags(text_blob)
@@ -440,7 +445,35 @@ def _passes_london_check(prop: dict) -> bool:
     return _is_london_listing(prop)
 
 
+_NO_PARKING_PHRASES: tuple[str, ...] = (
+    "no parking",
+    "no off-street parking",
+    "no off street parking",
+    "no allocated parking",
+    "no private parking",
+    "no resident parking",
+    "no residents parking",
+    "no on-site parking",
+    "no onsite parking",
+    "no garage",
+    "no driveway",
+    "parking not available",
+    "parking not included",
+    "does not include parking",
+    "does not come with parking",
+    "without parking",
+    "excludes parking",
+)
+
+
+def _has_no_parking(text_blob: str) -> bool:
+    """True when listing text explicitly negates parking (checked before positive signals)."""
+    return any(phrase in text_blob for phrase in _NO_PARKING_PHRASES)
+
+
 def _has_parking(text_blob: str) -> bool:
+    if _has_no_parking(text_blob):
+        return False
     parking_terms = [
         "parking",
         "garage",
@@ -642,7 +675,9 @@ def _get_soft_trade_off_reasons(prop: dict) -> list[str]:
         reasons.append(f"Fewer bathrooms ({bathrooms} vs {MANDATORY_MIN_BATHROOMS} min)")
     if distance is not None and distance > MANDATORY_MAX_DISTANCE_MILES:
         reasons.append(f"Slightly further ({distance:.1f} miles vs {MANDATORY_MAX_DISTANCE_MILES} max)")
-    if not _has_parking(text_blob):
+    if _has_no_parking(text_blob):
+        reasons.append("Listing explicitly states no parking")
+    elif not _has_parking(text_blob):
         reasons.append("Parking not explicitly mentioned in listing — verify with agent")
 
     return reasons
@@ -753,7 +788,7 @@ def _fetch_raw_properties_for_location(
 
         # Sleep between page fetches (skip after the last page)
         if page_index < pages_to_fetch - 1:
-            time.sleep(random.uniform(1.0, 3.0))
+            time.sleep(random.uniform(0.5, 1.5))
 
         page_index += 1
 
@@ -869,16 +904,16 @@ def _run_search(
     strict_list.sort(key=_compute_property_score, reverse=True)
     soft_list.sort(key=_compute_property_score, reverse=True)
 
-    # Parking annotation pass: properties in strict_list where parking is not detected
-    # in the short search-API summary are moved to soft_list. The full property description
-    # (available via get_property_details) is the authoritative source — so unconfirmed
-    # parking is a soft flag rather than a hard reject.
+    # Parking annotation pass: properties in strict_list without a positive parking signal
+    # (unconfirmed or explicit no-parking) move to soft_list. Excluded listings get the
+    # trade-off reason "Listing explicitly states no parking" in _get_soft_trade_off_reasons.
     confirmed_strict: list[dict] = []
     for prop in strict_list:
         text_blob = _collect_text_fields(prop)
         if _has_parking(text_blob):
             confirmed_strict.append(prop)
         else:
+            # unconfirmed OR explicit no parking (excluded) — same tier as soft
             soft_list.append(prop)
     strict_list = confirmed_strict
     soft_list.sort(key=_compute_property_score, reverse=True)
@@ -921,8 +956,8 @@ def _build_constraint_impact_summary(
     return impact
 
 
-MAX_TOP_PICKS = 15
-MAX_TRADE_OFFS = 15
+MAX_TOP_PICKS = 40
+MAX_TRADE_OFFS = 40
 
 
 @tool

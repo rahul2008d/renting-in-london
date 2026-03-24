@@ -1,15 +1,12 @@
-import json
 import re
 import time
 
 import httpx
 
 import streamlit as st
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from data.london_areas import LONDON_AREAS
-from tools.commute_time import calculate_commute
-from tools.property_details import get_property_details
 
 
 FIXED_WORKPLACE = "22 Bishopsgate, London EC2N 4BQ"
@@ -36,7 +33,6 @@ LISTING_QUERY_MARKERS = [
     "parking",
     "furnished",
 ]
-SQFT_PATTERN = re.compile(r"\b(\d{2,5})\s*(?:sq\.?\s*ft|sqft|ft2|ft\u00b2)\b", re.IGNORECASE)
 PROPERTY_LINK_ID_PATTERN = re.compile(r"/properties/(\d+)")
 REQUIRED_SECTION_HEADINGS = (
     "### Top picks now",
@@ -59,6 +55,16 @@ class ListingBlockModel(BaseModel):
     agent_contact: str
     summary: str
     commute_map: str
+    link: str
+
+
+class CompactListingModel(BaseModel):
+    """Phase 2 compact card: minimum fields from search results only."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    title: str
+    summary_line: str
     link: str
 
 
@@ -170,76 +176,11 @@ def _add_section_counts(reply: str) -> str:
     return "\n".join(lines)
 
 
-def _safe_json_loads(raw: str) -> dict:
-    try:
-        parsed = json.loads(raw)
-        return parsed if isinstance(parsed, dict) else {}
-    except json.JSONDecodeError:
-        return {}
-
-
-def _extract_sqft_text(floor_area_sqft: int | None = None, *candidates: object) -> str | None:
-    if isinstance(floor_area_sqft, (int, float)) and floor_area_sqft > 0:
-        return f"{int(floor_area_sqft)} sq ft"
-    for candidate in candidates:
-        if not isinstance(candidate, str):
-            continue
-        match = SQFT_PATTERN.search(candidate)
-        if match:
-            return f"{match.group(1)} sq ft"
-    return None
-
-
 def _extract_property_id_from_link(link: str) -> str | None:
     if not isinstance(link, str):
         return None
     match = PROPERTY_LINK_ID_PATTERN.search(link)
     return match.group(1) if match else None
-
-
-def _pick_commute_option(options: list[dict], preference: str) -> dict | None:
-    if not options:
-        return None
-    normalized = (preference or "fastest").strip().lower()
-    if normalized == "least_walking":
-        return min(
-            options,
-            key=lambda opt: (
-                int(opt.get("walking_minutes") or 10**6),
-                int(opt.get("total_duration_minutes") or 10**6),
-            ),
-        )
-    if normalized == "fewest_changes":
-        return min(
-            options,
-            key=lambda opt: (
-                int(opt.get("number_of_changes") or 10**6),
-                int(opt.get("total_duration_minutes") or 10**6),
-            ),
-        )
-    return min(options, key=lambda opt: int(opt.get("total_duration_minutes") or 10**6))
-
-
-def _expected_confidence(details: dict, commute_payload: dict, sqft_text: str | None) -> str:
-    score = 0
-    if isinstance(details.get("bedrooms"), (int, float)) and isinstance(details.get("bathrooms"), (int, float)):
-        score += 1
-
-    key_features = details.get("key_features") if isinstance(details.get("key_features"), list) else []
-    if key_features:
-        score += 1
-    if len(key_features) >= 3:
-        score += 1
-    if not commute_payload.get("error"):
-        score += 1
-    if sqft_text:
-        score += 1
-
-    if score >= 4:
-        return "high"
-    if score >= 2:
-        return "medium"
-    return "low"
 
 
 def _agent_listing_output_contract() -> str:
@@ -248,8 +189,18 @@ def _agent_listing_output_contract() -> str:
         "- Treat search scope as anywhere in London (do not ask for preferred areas).\n"
         "- Search broadly across London areas before finalizing picks.\n"
         "- Use markdown headings exactly: '### Top picks now', '### Good with trade-offs', '### Rejected with reasons'.\n"
+        "- For the initial search response, use this exact compact card structure per property (parse-friendly):\n"
+        "  <number>) <Address, Area>\n"
+        "  - Summary line: <price> | <beds> bed | <baths> bath | <type> | Zone <n> | Parking: <confirmed/unconfirmed/excluded>\n"
+        "  - Amenity tags: <tag1>, <tag2>, ... (omit line if empty)\n"
+        "  - Floor area: <sqft> sq ft (omit line if null)\n"
+        "  - Quality signals: <signal1>, <signal2>, <signal3> (omit if none detected)\n"
+        "  - Recommendation: <Highly Recommended/Worth Viewing/Consider If Flexible/Low Priority>\n"
+        "  - Trade-off: <reason> (omit in Top picks; include only under Good with trade-offs)\n"
+        "  - Link: https://www.rightmove.co.uk/properties/<id>\n"
+        "- Full detailed cards with all fields are only required when the user requests details on a specific property.\n"
         "- For each property, use a numbered title line or `####` title as a clean readable property heading (address/area only, no Rightmove ID in title).\n"
-        "- For each property, include bullets for: At a glance, Confidence, "
+        "- When giving full detail (on user request), for each property include bullets for: At a glance, Confidence, "
         "Trade-offs or risks, Commute lens, Nearest stations, Key features, Lettings details, EPC rating, Amenities summary, Agent contact, "
         "Summary, Commute map, Link.\n"
         "- Confidence must be one of: High, Medium, Low.\n"
@@ -272,6 +223,7 @@ def _split_listing_blocks(text: str) -> list[dict[str, str]]:
     title_pattern = re.compile(r"^\s*(?:\d+\)|\d+\.|####)\s+(.+?)\s*$")
     bullet_pattern = re.compile(r"^\s*-\s*([^:]+):\s*(.+?)\s*$")
 
+    # Full Phase-3 cards + Phase-2 compact (one-line summary, optional tags/score lines).
     key_map = {
         "at a glance": "at_a_glance",
         "confidence": "confidence",
@@ -286,6 +238,16 @@ def _split_listing_blocks(text: str) -> list[dict[str, str]]:
         "summary": "summary",
         "commute map": "commute_map",
         "link": "link",
+        "rightmove link": "link",
+        "one-line summary": "summary_line",
+        "summary line": "summary_line",
+        "amenity tags": "amenity_tags",
+        "floor area": "floor_area",
+        "score": "score",
+        "trade-off": "trade_off_reason",
+        "trade-offs": "trade_off_reason",
+        "quality signals": "quality_signals",
+        "recommendation": "recommendation",
     }
 
     for raw in lines:
@@ -312,113 +274,93 @@ def _split_listing_blocks(text: str) -> list[dict[str, str]]:
     return blocks
 
 
-def _validate_listing_blocks_with_pydantic(reply: str, commute_preference: str) -> list[str]:
+def _coerce_compact_listing_fields(block: dict[str, str]) -> dict[str, str]:
+    """Build minimal fields for CompactListingModel from parsed bullets."""
+    title = (block.get("title") or "").strip()
+    summary_line = (
+        (block.get("summary_line") or "").strip()
+        or (block.get("at_a_glance") or "").strip()
+    )
+    link = (block.get("link") or "").strip()
+    return {"title": title, "summary_line": summary_line, "link": link}
+
+
+def _validate_full_listing_block(
+    idx: int,
+    model: ListingBlockModel,
+    commute_preference: str,
+) -> list[str]:
+    """Phase 3: format-only checks (no live API re-fetch; data accuracy is the agent's job)."""
     issues: list[str] = []
+
+    if model.confidence.strip().lower() not in {"high", "medium", "low"}:
+        issues.append(f"listing_{idx}: invalid_confidence_value")
+
+    property_id = _extract_property_id_from_link(model.link)
+    if not property_id:
+        issues.append(f"listing_{idx}: invalid_property_link")
+
+    commute_map_lower = model.commute_map.lower()
+    if "rightmove" in commute_map_lower:
+        issues.append(f"listing_{idx}: commute_map_points_to_rightmove")
+    if "google.com/maps" not in commute_map_lower and "maps.google" not in commute_map_lower:
+        issues.append(f"listing_{idx}: commute_map_missing_google_directions_link")
+
+    summary_word_count = len(re.findall(r"\b\w+\b", model.summary))
+    if summary_word_count < 20:
+        issues.append(f"listing_{idx}: summary_too_brief")
+
+    pref_label = commute_preference.replace("_", " ").lower()
+    if pref_label not in model.commute_lens.lower():
+        issues.append(f"listing_{idx}: commute_preference_label_missing")
+
+    commute_lens_lower = model.commute_lens.lower()
+    if not ("min" in commute_lens_lower or "minute" in commute_lens_lower):
+        issues.append(f"listing_{idx}: commute_lens_missing_duration_units")
+
+    return issues
+
+
+def _validate_listing_blocks_with_pydantic(reply: str, commute_preference: str) -> list[str]:
+    """Validate listing blocks: full Phase-3 cards get strict checks; Phase-2 compact cards only need valid shape."""
+    listing_issues: list[str] = []
     blocks = _split_listing_blocks(reply)
     if not blocks:
         return ["no_listing_blocks"]
 
-    details_cache: dict[str, dict] = {}
-    commute_cache: dict[str, dict] = {}
+    block_modes: list[str] = []
 
     for idx, block in enumerate(blocks, start=1):
         title = str(block.get("title") or "")
         if "rightmove id" in title.lower():
-            issues.append(f"listing_{idx}: title_contains_rightmove_id")
+            listing_issues.append(f"listing_{idx}: title_contains_rightmove_id")
 
+        full_model: ListingBlockModel | None = None
         try:
-            model = ListingBlockModel.model_validate(block)
-        except ValidationError as exc:
-            issues.append(f"listing_{idx}: pydantic_validation_failed")
-            for err in exc.errors():
-                field = ".".join(str(x) for x in err.get("loc", []))
-                issues.append(f"listing_{idx}: missing_or_invalid::{field}")
+            full_model = ListingBlockModel.model_validate(block)
+        except ValidationError:
+            full_model = None
+
+        if full_model is not None:
+            block_modes.append("full")
+            listing_issues.extend(_validate_full_listing_block(idx, full_model, commute_preference))
             continue
 
-        if model.confidence.strip().lower() not in {"high", "medium", "low"}:
-            issues.append(f"listing_{idx}: invalid_confidence_value")
-
-        property_id = _extract_property_id_from_link(model.link)
-        if not property_id:
-            issues.append(f"listing_{idx}: invalid_property_link")
+        compact_dict = _coerce_compact_listing_fields(block)
+        try:
+            CompactListingModel.model_validate(compact_dict)
+        except ValidationError:
+            block_modes.append("fail")
+            listing_issues.append(f"listing_{idx}: listing_block_neither_full_nor_compact")
             continue
 
-        if property_id not in details_cache:
-            details_cache[property_id] = _safe_json_loads(get_property_details(property_id))
-        details = details_cache[property_id]
-        if details.get("error"):
-            issues.append(f"listing_{idx}: property_details_error")
-            continue
+        block_modes.append("compact")
 
-        sqft_text = _extract_sqft_text(
-            details.get("floor_area_sqft"),  # structured field from search/property_details
-            model.at_a_glance,
-            ", ".join(details.get("key_features") or []) if isinstance(details.get("key_features"), list) else "",
-            details.get("description"),
-            details.get("informative_summary"),
-        )
-        if sqft_text and "sq ft" not in model.at_a_glance.lower():
-            issues.append(f"listing_{idx}: missing_sqft_in_at_a_glance")
+    # Phase 2: all compact cards — never trigger per-listing retries (commute/EPC/link checks).
+    if blocks and block_modes and all(m == "compact" for m in block_modes):
+        return []
 
-        epc = details.get("epc_rating")
-        if isinstance(epc, str) and epc.strip():
-            if epc.lower() not in model.epc_rating.lower():
-                issues.append(f"listing_{idx}: epc_mismatch")
-
-        commute_payload = {"error": "coordinates_missing"}
-        location = details.get("location") if isinstance(details.get("location"), dict) else {}
-        lat = location.get("latitude")
-        lon = location.get("longitude")
-        if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
-            commute_key = f"{lat:.5f},{lon:.5f}|{commute_preference}"
-            if commute_key not in commute_cache:
-                commute_cache[commute_key] = _safe_json_loads(
-                    calculate_commute(float(lat), float(lon), FIXED_WORKPLACE)
-                )
-            commute_payload = commute_cache[commute_key]
-
-            options = commute_payload.get("journey_options") if isinstance(commute_payload.get("journey_options"), list) else []
-            valid_options = [item for item in options if isinstance(item, dict)]
-            expected = _pick_commute_option(valid_options, commute_preference)
-            if expected and isinstance(expected.get("total_duration_minutes"), int):
-                duration = str(expected.get("total_duration_minutes"))
-                if duration not in model.commute_lens:
-                    issues.append(f"listing_{idx}: commute_duration_not_aligned_with_preference")
-
-        pref_label = commute_preference.replace("_", " ").lower()
-        if pref_label not in model.commute_lens.lower():
-            issues.append(f"listing_{idx}: commute_preference_label_missing")
-
-        commute_lens_lower = model.commute_lens.lower()
-        if not ("min" in commute_lens_lower or "minute" in commute_lens_lower):
-            issues.append(f"listing_{idx}: commute_lens_missing_duration_units")
-        detail_markers = sum(
-            1
-            for marker in ("walk", "walking", "change", "changes", "line", "stop")
-            if marker in commute_lens_lower
-        )
-        if detail_markers == 0:
-            issues.append(f"listing_{idx}: commute_lens_missing_detail_context")
-
-        commute_map_lower = model.commute_map.lower()
-        if "rightmove" in commute_map_lower:
-            issues.append(f"listing_{idx}: commute_map_points_to_rightmove")
-        if not (
-            "google.com/maps" in commute_map_lower
-            or "maps.google." in commute_map_lower
-            or "maps/dir" in commute_map_lower
-        ):
-            issues.append(f"listing_{idx}: commute_map_missing_google_directions_link")
-
-        summary_word_count = len(re.findall(r"\b\w+\b", model.summary))
-        if summary_word_count < 20:
-            issues.append(f"listing_{idx}: summary_too_brief")
-
-        expected_conf = _expected_confidence(details, commute_payload, sqft_text)
-        if model.confidence.strip().lower() != expected_conf:
-            issues.append(f"listing_{idx}: confidence_not_aligned_with_data")
-
-    return issues
+    return listing_issues
 
 
 def _missing_listing_sections(reply: str, commute_preference: str) -> list[str]:

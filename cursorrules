@@ -1,0 +1,132 @@
+# Renting in London — Project Context for Cursor
+
+## What This Project Is
+A London rental property search agent built with Python. It scrapes Rightmove for live
+rental listings, filters and scores them, calculates commute times, finds nearby
+amenities, and presents results through a Streamlit chat UI powered by an LLM agent
+(GPT-5 via strands-agents framework).
+
+## Architecture
+- `agent.py` — LLM agent setup with system prompt, tool registration, OpenAI model config.
+  Creates agent at module level AND via create_agent() factory (used by app.py).
+- `app.py` — Streamlit frontend with dark theme, Pydantic validation of agent output
+  (ListingBlockModel / CompactListingModel), retry logic for incomplete responses, markdown
+  formatting pipeline. Phase 3 full-card validation is format-only (confidence, link shape,
+  commute map URL, summary length, commute lens cues) — no live API re-fetching; data accuracy
+  is the agent's responsibility.
+- `tools/rightmove_search.py` — Core search tool (1009 lines). Fetches from Rightmove API
+  with pagination (up to 42 pages), retry logic, rate-limit delays. Filters client-side
+  for price, bedrooms, bathrooms, excluded types. Parking is a SOFT filter (not hard
+  reject — properties without parking in summary text are moved to soft_list, not rejected).
+  Furnished filtering is done CLIENT-SIDE because Rightmove's server-side "furnished" filter
+  excludes "furnished or unfurnished" flexible listings. Server-side uses
+  `furnishTypes=furnished,partFurnished` to cast the widest net.
+  Includes amenity tag extraction and floor area sqft parsing.
+- `tools/property_details.py` — Fetches full property detail page, extracts PAGE_MODEL JSON.
+  Has retry logic (3 attempts with backoff) and pre-request jitter.
+- `tools/commute_time.py` — Commute calculation via SerpAPI Google Maps → Google Directions
+  API → TfL Journey Planner (waterfall fallback). Has in-memory cache with 15min TTL.
+  Error responses are NOT cached (only successful results are cached).
+- `tools/local_amenities.py` — OpenStreetMap Overpass API queries for Indian groceries,
+  restaurants, fish shops, supermarkets. Has 1s sleep between queries when fetching all categories.
+- `tools/listing_signals.py` — Pure Python helper (not a @tool). Extracts building quality,
+  noise, light, heating, outdoor space, security, storage, glazing, hidden costs, and EPC
+  signals from listing text. Used internally by `score_properties`.
+- `tools/price_scorer.py` — Enhanced multi-dimension scoring: price, space, location, commute,
+  amenity profile, parking, listing quality (via listing_signals), freshness, amenity tags, data
+  completeness. Produces recommendation tiers. Single source of truth for property ranking.
+- `tools/decision_ranker.py` — Classifies properties into Strong Match / Maybe / Reject
+  (`rank_property_decisions`). Same parking/furnished alignment as rightmove_search.py.
+  **On-demand only** — not part of the automatic Phase 1 pipeline; optional when the user
+  asks to classify or re-rank a custom set. Score thresholds: >=58 Strong Match, >=42 Maybe,
+  else Reject.
+- `tools/constraint_impact.py` — Analyzes which single filter reduces results most
+- `tools/area_intel.py` — Returns curated area profiles from data/area_profiles.py
+- `data/london_areas.py` — London borough/area → Rightmove location ID mapping, zone data,
+  postcode outward → zone mapping. get_london_borough_areas() deduplicates by location ID.
+- `data/area_profiles.py` — Curated neighbourhood profiles for ~30 areas (vibe, safety,
+  transport, etc.) plus auto-generated baseline profiles for all LONDON_AREAS entries.
+- `scripts/` — Diagnostic scripts for testing search, pagination, API responses.
+  Note: _debug_api.py and _debug_pages.py still have stale mustHave=parking params.
+
+## Key Design Decisions
+- Single London-wide search using REGION^87490 (not per-borough) because borough-level
+  IDs return non-London results from Rightmove
+- Parking is NOT a mandatory filter — it's a soft annotation. Properties without parking
+  in the summary text go to "with_trade_offs" tier via a parking annotation pass in
+  _run_search, not rejected. The _mandatory_reject_reasons function does NOT check parking.
+- furnishTypes server-side uses "furnished,partFurnished" (NOT just "furnished") because
+  Rightmove excludes "furnished or unfurnished" flexible listings when you filter for
+  just "furnished". Client-side _is_furnished() handles the hard reject — it only rejects
+  listings that explicitly say "unfurnished" (with lookbehind protection for "or unfurnished"
+  and "/ unfurnished" phrasing).
+- Server-side params: channel=RENT, maxPrice=2500, minBedrooms=2, maxBedrooms=4,
+  minBathrooms=2, sortType=6 (newest), radius=0.0, furnishTypes=furnished,partFurnished
+- Client-side mandatory filters: price ≤ £2300 (strict) / £2500 (soft), 2+ beds,
+  2+ baths, not excluded type (house share/retirement/student), not explicitly unfurnished
+- Pagination uses resultCount from first page to calculate exact pages needed (while loop)
+- Rate limiting: 1-3s random sleep between pages, 5s between boroughs, 3-attempt retry
+  with exponential backoff
+- London check uses GPS coordinates first (_passes_london_check), falling back to
+  postcode heuristic only when coordinates are absent. This correctly handles outer-London
+  boroughs (HA, UB, EN, RM, IG, DA, BR, CR, SM, KT, TW postcodes).
+- _extract_property outputs amenity_tags (list[str]), floor_area_sqft (int|None),
+  and parking_status ("confirmed"/"unconfirmed"/"excluded") on every property.
+
+## Important Constraints
+- Rightmove caps search results at 42 pages (1008 listings max)
+- The search API returns only a short summary, NOT the full description — so text-based
+  detection (parking, amenities, etc.) works on limited text
+- `_collect_text_fields()` reads: propertySubType, propertyTypeFullDescription, summary,
+  displayStatus, keyFeatures, keywords — NOT the full description
+- The full description is only available via property_details.py (individual page fetch)
+- mustHave=parking is NEVER sent server-side — it silently drops listings where parking
+  is only in free text
+
+## Tech Stack
+- Python 3.11+, uv for package management
+- strands-agents (agent framework) with OpenAI GPT-5
+- httpx for HTTP requests
+- Streamlit for frontend
+- Pydantic for response validation in app.py
+- No database — all in-memory, stateless between sessions
+
+## When Making Changes
+- NEVER add parking as a mandatory reject filter — it's intentionally soft
+- NEVER change furnishTypes to just "furnished" — it must be "furnished,partFurnished"
+- NEVER add mustHave=parking to server-side Rightmove params
+- Keep filter logic consistent between rightmove_search.py and decision_ranker.py
+  (parking terms list, furnished regex, excluded type terms must match)
+- All tools return JSON strings (strands framework requirement)
+- All tool functions must be decorated with @tool (except pure helper modules —
+  e.g. listing_signals.py must stay non-tool)
+- `score_properties` is the single ranking authority — do not add competing scoring tools
+  to Phase 1 of the agent pipeline
+- Phase 2 compact card format is defined once in `agent.py` (response style section),
+  referenced elsewhere if needed — never redefine it in duplicate
+- app.py ListingBlockModel has 14 required fields — adding optional fields is fine
+  but removing required ones will break validation
+- The parking annotation pass in _run_search (confirmed_strict loop) must stay —
+  it's what moves unconfirmed-parking properties from strict to soft tier
+- Test with: `uv run python scripts/live_full_count.py` for search pipeline validation
+- _is_london_listing and _is_in_london_bounds are legacy — _passes_london_check is the
+  authoritative function used in _fetch_raw_properties_for_location
+
+## Current Feature Status
+- Amenity tags: IMPLEMENTED in _extract_property (Dishwasher, Washer/Dryer, Balcony/Terrace,
+  En-suite, Bills Included, Pet Friendly, Garden, Building Amenities, Newly Refurbished,
+  Lift, Bike Storage)
+- Floor area sqft: IMPLEMENTED in _extract_property (parses sqft and sqm from text + displaySize)
+- Days on market / stale flag: NOT YET IMPLEMENTED
+- Crime data tool: NOT YET IMPLEMENTED
+- Parks in local_amenities: NOT YET IMPLEMENTED
+- Walk-to-station minutes: NOT YET IMPLEMENTED
+- Commute quality label: NOT YET IMPLEMENTED
+- Floor area in space_score: IMPLEMENTED in price_scorer._space_score (uses floor_area_sqft when present)
+- Listing quality signals: IMPLEMENTED in tools/listing_signals.py
+- Enhanced scoring (10+ dimensions): IMPLEMENTED in tools/price_scorer.py
+- Recommendation tiers: IMPLEMENTED (via price_scorer + listing_signals)
+- rank_property_decisions: DEMOTED to on-demand only (not in automatic Phase 1 pipeline)
+- Phase 3 validation (app.py): simplified to format checks; no live API re-fetching
+- Price score formula: absolute scale based on £2300 budget, not relative to result set. £1800=100, £2300=50, £2500=0.
+- EPC rating: only available in Phase 3 (from get_property_details). During Phase 2 scoring, EPC defaults to 50 (neutral). This is expected.
