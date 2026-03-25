@@ -13,18 +13,36 @@ from data.london_areas import (
     get_london_borough_areas,
     get_zone_from_address,
 )
+from tools.listing_signals import extract_all_signals
+from tools.price_scorer import (
+    WEIGHT_PRESETS,
+    _amenity_score,
+    _amenity_tag_score,
+    _commute_score,
+    _data_completeness_score,
+    _freshness_score,
+    _location_score,
+    _normalize_key_features,
+    _parking_score,
+    _price_score,
+    _resolve_area_name,
+    _space_score,
+    _to_float as _score_to_float,
+    _to_int as _score_to_int,
+    recommendation_tier,
+)
 
 
 RIGHTMOVE_SEARCH_API = "https://www.rightmove.co.uk/api/_search"
 RIGHTMOVE_REFERER = "https://www.rightmove.co.uk/property-to-rent/find.html"
 RIGHTMOVE_TYPEAHEAD_BASE = "https://www.rightmove.co.uk/typeAhead/uknostreet"
 
-MANDATORY_MAX_PRICE = 2300
+MANDATORY_MAX_PRICE = 2250
 MANDATORY_MIN_BEDROOMS = 2
 MANDATORY_MIN_BATHROOMS = 2
 MANDATORY_MAX_DISTANCE_MILES = 5.0
 # Soft expansion for "With Trade-offs" tier when strict filtering returns few results
-SOFT_MAX_PRICE = 2500
+SOFT_MAX_PRICE = 2300
 SOFT_MAX_DISTANCE_MILES = 7.0
 PAGE_SIZE = 24
 MAX_LOCATION_CANDIDATES = 4
@@ -960,6 +978,105 @@ MAX_TOP_PICKS = 40
 MAX_TRADE_OFFS = 40
 
 
+def _score_extracted_property(
+    prop: dict,
+    workplace_lat: float = 51.5154,
+    workplace_lon: float = -0.0820,
+) -> None:
+    """Score an already-extracted property dict in-place (balanced weights; matches score_properties)."""
+    weights = WEIGHT_PRESETS["balanced"]
+
+    price = _score_to_float(prop.get("price_pcm"), 0.0)
+    bedrooms = _score_to_int(prop.get("bedrooms"), 0)
+    property_type = str(prop.get("property_type") or "")
+    address = str(prop.get("address") or "")
+    latitude = _score_to_float(prop.get("latitude"), 0.0)
+    longitude = _score_to_float(prop.get("longitude"), 0.0)
+
+    parking_status = str(prop.get("parking_status", "unconfirmed"))
+    first_visible_date = prop.get("first_visible_date")
+    floor_area_sqft = prop.get("floor_area_sqft")
+    floor_sq: int | None = None
+    if isinstance(floor_area_sqft, (int, float)) and floor_area_sqft > 0:
+        floor_sq = int(floor_area_sqft)
+
+    amenity_tags = prop.get("amenity_tags") if isinstance(prop.get("amenity_tags"), list) else []
+    summary_text = str(prop.get("summary") or "")
+    key_features_list = _normalize_key_features(prop.get("key_features"))
+    epc_raw = prop.get("epc_rating")
+    epc_rating = str(epc_raw).strip() if epc_raw is not None and str(epc_raw).strip() else None
+
+    text_pieces = [summary_text] + [str(f) for f in key_features_list] + [
+        str(prop.get("property_type") or ""),
+        str(prop.get("property_type_full") or ""),
+        str(prop.get("display_status") or ""),
+    ]
+    text_blob = " ".join(text_pieces).lower()
+
+    signal_payload = extract_all_signals(text_blob, key_features_list, epc_rating)
+    listing_quality = float(signal_payload["listing_quality_score"])
+
+    area_name = _resolve_area_name(address)
+    zone_val = prop.get("zone")
+    if isinstance(zone_val, int):
+        zone = zone_val
+    elif isinstance(zone_val, str) and zone_val.strip().isdigit():
+        zone = int(zone_val.strip())
+    else:
+        zone = get_zone_from_address(address)
+
+    price_score = _price_score(price)
+    space_score = _space_score(bedrooms, property_type, price, floor_sq)
+    location_score = _location_score(zone)
+    commute_score, commute_distance_km = _commute_score(
+        latitude, longitude, workplace_lat, workplace_lon
+    )
+    amenity_profile_score = _amenity_score(area_name)
+    parking_sc = _parking_score(parking_status)
+    freshness_sc = _freshness_score(
+        str(first_visible_date) if first_visible_date is not None else None
+    )
+    data_quality_sc = _data_completeness_score(prop)
+    amenity_tag_sc = _amenity_tag_score(amenity_tags)
+
+    total_score = (
+        price_score * weights["price"]
+        + space_score * weights["space"]
+        + location_score * weights["location"]
+        + commute_score * weights["commute"]
+        + amenity_profile_score * weights["amenity_profile"]
+        + parking_sc * weights["parking"]
+        + listing_quality * weights["listing_quality"]
+        + freshness_sc * weights["freshness"]
+        + amenity_tag_sc * weights["amenity_tags"]
+        + data_quality_sc * weights["data_quality"]
+    )
+
+    tier = recommendation_tier(total_score)
+
+    prop["total_score"] = round(total_score, 2)
+    prop["recommendation_tier"] = tier
+    prop["area"] = area_name
+    prop["quality_signals"] = signal_payload["top_signals"]
+    prop["listing_quality_score"] = signal_payload["listing_quality_score"]
+    prop["scores"] = {
+        "price": round(price_score, 1),
+        "space": round(space_score, 1),
+        "location": round(location_score, 1),
+        "commute": round(commute_score, 1),
+        "amenity_profile": round(amenity_profile_score, 1),
+        "parking": round(parking_sc, 1),
+        "listing_quality": round(listing_quality, 1),
+        "freshness": round(freshness_sc, 1),
+        "amenity_tags": round(amenity_tag_sc, 1),
+        "data_quality": round(data_quality_sc, 1),
+    }
+    prop["signal_details"] = signal_payload
+    prop["commute_distance_km"] = (
+        round(commute_distance_km, 2) if isinstance(commute_distance_km, float) else None
+    )
+
+
 @tool
 def search_london_rentals(
     max_top_picks: int = MAX_TOP_PICKS,
@@ -1011,6 +1128,14 @@ def search_london_rentals(
         if reasons and i < len(trade_offs_parsed):
             trade_offs_parsed[i]["trade_off_reasons"] = reasons
 
+    for prop in top_picks:
+        _score_extracted_property(prop)
+    for prop in trade_offs_parsed:
+        _score_extracted_property(prop)
+
+    top_picks.sort(key=lambda p: p.get("total_score", 0), reverse=True)
+    trade_offs_parsed.sort(key=lambda p: p.get("total_score", 0), reverse=True)
+
     reject_reason_counts: dict[str, int] = {}
     for reasons in rejected_reasons_by_property:
         for r in reasons:
@@ -1027,6 +1152,17 @@ def search_london_rentals(
     }
 
     combined = top_picks + trade_offs_parsed
+
+    scoring_summary = {
+        "Highly Recommended": 0,
+        "Worth Viewing": 0,
+        "Consider If Flexible": 0,
+        "Low Priority": 0,
+    }
+    for prop in combined:
+        t = prop.get("recommendation_tier", "Low Priority")
+        if t in scoring_summary:
+            scoring_summary[t] += 1
 
     return json.dumps(
         {
@@ -1046,6 +1182,7 @@ def search_london_rentals(
                 "reject_reason_counts": reject_reason_counts,
                 "constraint_impact_if_relaxed": _build_constraint_impact_summary(rejected_reasons_by_property),
             },
+            "scoring_summary": scoring_summary,
             "top_picks": top_picks,
             "with_trade_offs": trade_offs_parsed,
             "properties": combined,

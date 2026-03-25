@@ -10,6 +10,7 @@ from data.area_profiles import get_profile
 from data.london_areas import get_zone_from_address, search_areas
 from tools.listing_signals import extract_all_signals, recommendation_tier
 
+# `recommendation_tier` is defined in listing_signals; re-exported for imports from this module.
 
 WEIGHT_PRESETS = {
     "balanced": {
