@@ -37,7 +37,7 @@ RIGHTMOVE_SEARCH_API = "https://www.rightmove.co.uk/api/_search"
 RIGHTMOVE_REFERER = "https://www.rightmove.co.uk/property-to-rent/find.html"
 RIGHTMOVE_TYPEAHEAD_BASE = "https://www.rightmove.co.uk/typeAhead/uknostreet"
 
-MANDATORY_MAX_PRICE = 2250
+MANDATORY_MAX_PRICE = 1900
 MANDATORY_MIN_BEDROOMS = 2
 MANDATORY_MIN_BATHROOMS = 2
 MANDATORY_MAX_DISTANCE_MILES = 5.0
@@ -974,8 +974,8 @@ def _build_constraint_impact_summary(
     return impact
 
 
-MAX_TOP_PICKS = 40
-MAX_TRADE_OFFS = 40
+MAX_TOP_PICKS = 50
+MAX_TRADE_OFFS = 50
 
 
 def _score_extracted_property(
