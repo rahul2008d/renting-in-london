@@ -17,10 +17,10 @@ WEIGHT_PRESETS = {
         "price": 0.22,
         "space": 0.16,
         "location": 0.13,
-        "commute": 0.12,
+        "commute": 0.08,
         "amenity_profile": 0.08,
         "parking": 0.08,
-        "listing_quality": 0.10,
+        "listing_quality": 0.14,
         "freshness": 0.05,
         "amenity_tags": 0.03,
         "data_quality": 0.03,
@@ -76,11 +76,11 @@ WEIGHT_PRESETS = {
 }
 
 ZONE_SCORES = {
-    1: 90.0,
-    2: 80.0,
-    3: 60.0,
-    4: 40.0,
-    5: 20.0,
+    1: 40.0,   # Congestion charge, poor for car owners
+    2: 85.0,   # Good balance: transport + car-friendly
+    3: 90.0,   # Best for car owners: affordable, easy parking
+    4: 60.0,   # Fine but further out
+    5: 30.0,   # Long commutes
 }
 
 
@@ -233,7 +233,6 @@ def _amenity_score(area_name: str | None) -> float:
 
     amenity_fields = [
         "restaurants",
-        "indian_groceries",
         "fish_shops",
         "supermarkets",
         "green_space",
@@ -246,10 +245,25 @@ def _amenity_score(area_name: str | None) -> float:
         value = profile.get(field)
         if isinstance(value, str) and value.strip():
             filled_fields += 1
-            richness_score += min(20.0, len(value.strip()) / 10.0)
+            richness_score += min(15.0, len(value.strip()) / 12.0)
 
-    base = (filled_fields / len(amenity_fields)) * 70.0
-    score = base + min(30.0, richness_score / len(amenity_fields))
+    # Indian groceries get double weight — important for user
+    indian_grocery_text = profile.get("indian_groceries")
+    if isinstance(indian_grocery_text, str) and indian_grocery_text.strip():
+        filled_fields += 1
+        ig_text = indian_grocery_text.strip().lower()
+        if any(w in ig_text for w in ("excellent", "very good", "one of the best", "strong")):
+            richness_score += 30.0
+        elif any(w in ig_text for w in ("good", "decent", "several")):
+            richness_score += 20.0
+        elif any(w in ig_text for w in ("some", "moderate", "handful")):
+            richness_score += 10.0
+        elif any(w in ig_text for w in ("limited", "few", "check")):
+            richness_score += 3.0
+
+    total_fields = len(amenity_fields) + 1  # +1 for indian_groceries
+    base = (filled_fields / total_fields) * 50.0
+    score = base + min(50.0, richness_score / total_fields * 3.0)
     return max(0.0, min(100.0, score))
 
 

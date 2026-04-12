@@ -58,11 +58,110 @@ SUPERMARKET_QUERY = """
 out body;
 """.strip()
 
+PARK_QUERY = """
+[out:json][timeout:25];
+(
+  node["leisure"="park"](around:{radius},{lat},{lon});
+  way["leisure"="park"](around:{radius},{lat},{lon});
+  node["leisure"="garden"](around:{radius},{lat},{lon});
+  node["leisure"="nature_reserve"](around:{radius},{lat},{lon});
+);
+out center body;
+""".strip()
+
+GP_SURGERY_QUERY = """
+[out:json][timeout:25];
+(
+  node["amenity"="doctors"](around:{radius},{lat},{lon});
+  node["amenity"="clinic"](around:{radius},{lat},{lon});
+  node["healthcare"="doctor"](around:{radius},{lat},{lon});
+);
+out body;
+""".strip()
+
+PHARMACY_QUERY = """
+[out:json][timeout:25];
+(
+  node["amenity"="pharmacy"](around:{radius},{lat},{lon});
+);
+out body;
+""".strip()
+
+GYM_QUERY = """
+[out:json][timeout:25];
+(
+  node["leisure"="fitness_centre"](around:{radius},{lat},{lon});
+  node["leisure"="sports_centre"](around:{radius},{lat},{lon});
+);
+out body;
+""".strip()
+
+SCHOOL_QUERY = """
+[out:json][timeout:25];
+(
+  node["amenity"="school"](around:{radius},{lat},{lon});
+  way["amenity"="school"](around:{radius},{lat},{lon});
+);
+out center body;
+""".strip()
+
+CAFE_QUERY = """
+[out:json][timeout:25];
+(
+  node["amenity"="cafe"](around:{radius},{lat},{lon});
+);
+out body;
+""".strip()
+
+TRANSPORT_QUERY = """
+[out:json][timeout:25];
+(
+  node["railway"="station"](around:{radius},{lat},{lon});
+  node["railway"="halt"](around:{radius},{lat},{lon});
+  node["station"="subway"](around:{radius},{lat},{lon});
+  way["railway"="station"](around:{radius},{lat},{lon});
+);
+out center body;
+""".strip()
+
+POST_OFFICE_QUERY = """
+[out:json][timeout:25];
+(
+  node["amenity"="post_office"](around:{radius},{lat},{lon});
+);
+out body;
+""".strip()
+
+INDIAN_RESTAURANT_QUERY = """
+[out:json][timeout:25];
+(
+  node["amenity"="restaurant"]["cuisine"~"indian|curry|south_asian|bangladeshi|pakistani|sri_lankan",i](around:{radius},{lat},{lon});
+);
+out body;
+""".strip()
+
 QUERY_MAP = {
     "indian_grocery": INDIAN_GROCERY_QUERY,
     "restaurant": RESTAURANT_QUERY,
     "fish_shop": FISH_SHOP_QUERY,
     "supermarket": SUPERMARKET_QUERY,
+    "park": PARK_QUERY,
+    "gp_surgery": GP_SURGERY_QUERY,
+    "pharmacy": PHARMACY_QUERY,
+    "gym": GYM_QUERY,
+    "school": SCHOOL_QUERY,
+    "cafe": CAFE_QUERY,
+    "transport": TRANSPORT_QUERY,
+    "post_office": POST_OFFICE_QUERY,
+    "indian_restaurant": INDIAN_RESTAURANT_QUERY,
+}
+
+CATEGORY_GROUPS: dict[str, list[str]] = {
+    "essentials": ["supermarket", "pharmacy", "gp_surgery", "park", "transport"],
+    "food": ["restaurant", "indian_restaurant", "indian_grocery", "fish_shop", "cafe"],
+    "lifestyle": ["gym", "cafe", "park"],
+    "family": ["school", "park", "gp_surgery", "pharmacy"],
+    "all": list(QUERY_MAP.keys()),
 }
 
 
@@ -95,6 +194,14 @@ def _parse_elements(
 
         element_lat = element.get("lat")
         element_lon = element.get("lon")
+        # Ways and relations (returned by `nwr` queries with `out center`) lack
+        # direct lat/lon; fall back to the centroid provided by Overpass.
+        if not isinstance(element_lat, (int, float)) or not isinstance(
+            element_lon, (int, float)
+        ):
+            center = element.get("center") if isinstance(element.get("center"), dict) else {}
+            element_lat = center.get("lat")
+            element_lon = center.get("lon")
         if not isinstance(element_lat, (int, float)) or not isinstance(
             element_lon, (int, float)
         ):
@@ -133,15 +240,35 @@ def _run_query(
     radius_metres: int,
 ) -> list[dict]:
     query = query_template.format(radius=radius_metres, lat=latitude, lon=longitude)
-    response = client.post(OVERPASS_URL, data={"data": query})
-    response.raise_for_status()
 
-    payload = response.json()
-    elements = payload.get("elements") if isinstance(payload, dict) else None
-    if not isinstance(elements, list):
-        return []
+    max_retries = 3
+    last_exc: Exception | None = None
+    for attempt in range(max_retries):
+        if attempt > 0:
+            time.sleep(3.0 * attempt)
+        try:
+            response = client.post(OVERPASS_URL, data={"data": query})
+            if response.status_code in (429, 503, 504):
+                last_exc = httpx.HTTPStatusError(
+                    f"Overpass returned {response.status_code}",
+                    request=response.request,
+                    response=response,
+                )
+                continue
+            response.raise_for_status()
+            payload = response.json()
+            elements = payload.get("elements") if isinstance(payload, dict) else None
+            if not isinstance(elements, list):
+                return []
+            return _parse_elements(elements, latitude, longitude)
+        except httpx.HTTPStatusError as exc:
+            last_exc = exc
+        except httpx.RequestError as exc:
+            last_exc = exc
 
-    return _parse_elements(elements, latitude, longitude)
+    if last_exc is not None:
+        raise last_exc
+    return []
 
 
 @tool
@@ -156,28 +283,46 @@ def find_nearby_amenities(
     Args:
         latitude: Property latitude.
         longitude: Property longitude.
-        amenity_type: One of "indian_grocery", "restaurant", "fish_shop",
-            "supermarket", or "all".
-        radius_metres: Search radius in metres.
+        amenity_type: A single category name, a group name, or "all".
+            Individual categories: indian_grocery, restaurant, fish_shop,
+            supermarket, park, gp_surgery, pharmacy, gym, school, cafe,
+            transport, post_office, indian_restaurant.
+            Groups: essentials (supermarket, pharmacy, gp_surgery, park,
+            transport), food (restaurant, indian_restaurant, indian_grocery,
+            fish_shop, cafe), lifestyle (gym, cafe, park), family (school,
+            park, gp_surgery, pharmacy), all.
+        radius_metres: Search radius in metres (clamped to 100–5000).
 
     Returns:
         JSON string containing categorized, distance-sorted amenity results.
-        For amenity_type="all", returns results for all four categories.
         On error, returns JSON with an "error" key.
     """
     normalized_type = (amenity_type or "all").strip().lower()
-    if normalized_type not in QUERY_MAP and normalized_type != "all":
+    if normalized_type not in QUERY_MAP and normalized_type not in CATEGORY_GROUPS:
         return json.dumps(
             {
                 "error": (
-                    "Invalid amenity_type. Use one of: indian_grocery, restaurant, "
-                    "fish_shop, supermarket, all."
+                    "Invalid amenity_type. Use a category (indian_grocery, restaurant, "
+                    "fish_shop, supermarket, park, gp_surgery, pharmacy, gym, school, "
+                    "cafe, transport, post_office, indian_restaurant), a group "
+                    "(essentials, food, lifestyle, family), or 'all'."
                 )
             }
         )
 
     safe_radius = max(100, min(int(radius_metres), 5000))
-    categories = list(QUERY_MAP.keys()) if normalized_type == "all" else [normalized_type]
+
+    if normalized_type in CATEGORY_GROUPS:
+        raw_list = CATEGORY_GROUPS[normalized_type]
+    else:
+        raw_list = [normalized_type]
+
+    seen: set[str] = set()
+    categories: list[str] = []
+    for cat in raw_list:
+        if cat not in seen:
+            seen.add(cat)
+            categories.append(cat)
 
     try:
         with httpx.Client(timeout=30.0, headers=HEADERS, follow_redirects=True) as client:
@@ -192,7 +337,7 @@ def find_nearby_amenities(
                     radius_metres=safe_radius,
                 )
                 if category_index < len(categories) - 1:
-                    time.sleep(1.0)
+                    time.sleep(2.0)
 
     except httpx.TimeoutException:
         return json.dumps(
@@ -247,3 +392,20 @@ def find_nearby_amenities(
             "results": results,
         }
     )
+
+
+def format_amenity_summary(results: dict[str, list[dict]]) -> str:
+    """Format amenity results into a human-readable one-line summary."""
+    parts: list[str] = []
+    for category, items in results.items():
+        if not items:
+            continue
+        label = category.replace("_", " ").title()
+        nearest = items[0] if items else None
+        nearest_info = ""
+        if nearest and nearest.get("name") != "Unnamed":
+            nearest_info = f" (nearest: {nearest['name']}, {nearest['distance_m']:.0f}m)"
+        elif nearest:
+            nearest_info = f" (nearest: {nearest['distance_m']:.0f}m)"
+        parts.append(f"{len(items)} {label}{nearest_info}")
+    return "; ".join(parts) if parts else "No amenities found in range"

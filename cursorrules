@@ -27,8 +27,11 @@ amenities, and presents results through a Streamlit chat UI powered by an LLM ag
 - `tools/commute_time.py` — Commute calculation via SerpAPI Google Maps → Google Directions
   API → TfL Journey Planner (waterfall fallback). Has in-memory cache with 15min TTL.
   Error responses are NOT cached (only successful results are cached).
-- `tools/local_amenities.py` — OpenStreetMap Overpass API queries for Indian groceries,
-  restaurants, fish shops, supermarkets. Has 1s sleep between queries when fetching all categories.
+- `tools/local_amenities.py` — OpenStreetMap Overpass API queries for 13 categories: Indian groceries,
+  restaurants, fish shops, supermarkets, parks, GP surgeries, pharmacies, gyms, schools, cafes,
+  transport stations, post offices, Indian restaurants. Category groups: essentials, food, lifestyle,
+  family, all. Retry logic on 429/503/504 with backoff. Center-coordinate fallback for way/polygon
+  elements. 2s sleep between queries when fetching multiple categories.
 - `tools/listing_signals.py` — Pure Python helper (not a @tool). Extracts building quality,
   noise, light, heating, outdoor space, security, storage, glazing, hidden costs, and EPC
   signals from listing text. Used internally by `score_properties`.
@@ -119,7 +122,11 @@ amenities, and presents results through a Streamlit chat UI powered by an LLM ag
 - Floor area sqft: IMPLEMENTED in _extract_property (parses sqft and sqm from text + displaySize)
 - Days on market / stale flag: NOT YET IMPLEMENTED
 - Crime data tool: NOT YET IMPLEMENTED
-- Parks in local_amenities: NOT YET IMPLEMENTED
+- Parks in local_amenities: IMPLEMENTED
+- Local amenities: ENHANCED with 13 categories (indian_grocery, restaurant, fish_shop, supermarket,
+  park, gp_surgery, pharmacy, gym, school, cafe, transport, post_office, indian_restaurant) plus
+  category groups (essentials, food, lifestyle, family, all). Retry logic on 429/503/504 with
+  backoff. Center-coordinate fallback for way/polygon elements.
 - Walk-to-station minutes: NOT YET IMPLEMENTED
 - Commute quality label: NOT YET IMPLEMENTED
 - Floor area in space_score: IMPLEMENTED in price_scorer._space_score (uses floor_area_sqft when present)

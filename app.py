@@ -110,8 +110,9 @@ def _format_listing_cards_markdown(reply: str) -> str:
                 out.append("")
                 out.append("---")
                 out.append("")
+            number = title_match.group(1).strip().rstrip('.)')
             title = title_match.group(2).strip()
-            out.append(f"#### {title}")
+            out.append(f"#### {number}. {title}")
             in_listing_block = True
             continue
 
@@ -189,6 +190,7 @@ def _agent_listing_output_contract() -> str:
         "- Treat search scope as anywhere in London (do not ask for preferred areas).\n"
         "- Search broadly across London areas before finalizing picks.\n"
         "- Use markdown headings exactly: '### Top picks now', '### Good with trade-offs', '### Rejected with reasons'.\n"
+        "- Number properties continuously across all sections (do not restart at 1 for each section).\n"
         "- For the initial search response, use this exact compact card structure per property (parse-friendly):\n"
         "  <number>) <Address, Area>\n"
         "  - Summary line: <price> | <beds> bed | <baths> bath | <type> | Zone <n> | Parking: <confirmed/unconfirmed/excluded>\n"

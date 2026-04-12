@@ -5,6 +5,7 @@ import math
 import random
 import re
 import time
+from datetime import date
 import httpx
 from strands import tool
 
@@ -266,6 +267,15 @@ def _extract_property(prop: dict) -> dict:
 
     zone = get_zone_from_address(display_address)
 
+    days_on_market = None
+    fvd = prop.get("firstVisibleDate")
+    if isinstance(fvd, str) and fvd.strip():
+        try:
+            visible_date = date.fromisoformat(fvd[:10])
+            days_on_market = (date.today() - visible_date).days
+        except (ValueError, TypeError):
+            pass
+
     return {
         "id": property_id,
         "price_pcm": price.get("amount"),
@@ -301,6 +311,8 @@ def _extract_property(prop: dict) -> dict:
         "summary": prop.get("summary"),
         "amenity_tags": amenity_tags,
         "floor_area_sqft": floor_area_sqft,
+        "days_on_market": days_on_market,
+        "stale": days_on_market is not None and days_on_market > 28,
     }
 
 
@@ -974,8 +986,8 @@ def _build_constraint_impact_summary(
     return impact
 
 
-MAX_TOP_PICKS = 50
-MAX_TRADE_OFFS = 50
+MAX_TOP_PICKS = 25
+MAX_TRADE_OFFS = 25
 
 
 def _score_extracted_property(
@@ -1095,7 +1107,7 @@ def search_london_rentals(
         sort_by: Sort mode: "newest", "lowest_price", or "highest_price".
 
     Returns:
-        JSON string containing top_picks, with_trade_offs, properties, filter_diagnostics.
+        JSON string containing top_picks, with_trade_offs, filter_diagnostics.
     """
     # REGION^87490 is the only Rightmove identifier that reliably returns London
     # rentals. Borough-level REGION IDs return properties from other UK regions.
@@ -1118,7 +1130,7 @@ def search_london_rentals(
             err_msg = "Rightmove rate-limited the request (429). Please retry shortly."
         else:
             err_msg = "Request to Rightmove failed."
-        return json.dumps({"error": err_msg, "top_picks": [], "with_trade_offs": [], "properties": []})
+        return json.dumps({"error": err_msg, "top_picks": [], "with_trade_offs": []})
 
     top_picks = [_extract_property(p) for p in strict_list[:max_top_picks]]
     trade_offs_parsed = [_extract_property(p) for p in soft_list[:max_trade_offs]]
@@ -1136,6 +1148,25 @@ def search_london_rentals(
     top_picks.sort(key=lambda p: p.get("total_score", 0), reverse=True)
     trade_offs_parsed.sort(key=lambda p: p.get("total_score", 0), reverse=True)
 
+    # Deduplicate by property ID across both lists (handles within-list and cross-list dupes)
+    seen_ids: set[str] = set()
+    deduped_top: list[dict] = []
+    for p in top_picks:
+        pid = str(p.get("id") or "")
+        if pid and pid not in seen_ids:
+            seen_ids.add(pid)
+            deduped_top.append(p)
+
+    deduped_trade: list[dict] = []
+    for p in trade_offs_parsed:
+        pid = str(p.get("id") or "")
+        if pid and pid not in seen_ids:
+            seen_ids.add(pid)
+            deduped_trade.append(p)
+
+    top_picks = deduped_top
+    trade_offs_parsed = deduped_trade
+
     reject_reason_counts: dict[str, int] = {}
     for reasons in rejected_reasons_by_property:
         for r in reasons:
@@ -1151,18 +1182,18 @@ def search_london_rentals(
         "excluded_types": ["house share", "retirement home", "student accommodation"],
     }
 
-    combined = top_picks + trade_offs_parsed
-
     scoring_summary = {
         "Highly Recommended": 0,
         "Worth Viewing": 0,
         "Consider If Flexible": 0,
         "Low Priority": 0,
     }
-    for prop in combined:
+    for prop in top_picks + trade_offs_parsed:
         t = prop.get("recommendation_tier", "Low Priority")
         if t in scoring_summary:
             scoring_summary[t] += 1
+
+    total_results = len(top_picks) + len(trade_offs_parsed)
 
     return json.dumps(
         {
@@ -1171,20 +1202,19 @@ def search_london_rentals(
             "areas_queried": areas_queried,
             "total_areas_searched": len(areas_queried),
             "raw_collected": len(raw_all),
-            "total_results": len(combined),
+            "total_results": total_results,
             "top_picks_count": len(top_picks),
             "with_trade_offs_count": len(trade_offs_parsed),
             "enforced_filters": enforced_filters,
             "expansion_used": {"soft_max_price": SOFT_MAX_PRICE, "soft_max_distance_miles": SOFT_MAX_DISTANCE_MILES},
             "filter_diagnostics": {
                 "accepted_count": len(strict_list) + len(soft_list),
-                "returned_count": len(combined),
+                "returned_count": total_results,
                 "reject_reason_counts": reject_reason_counts,
                 "constraint_impact_if_relaxed": _build_constraint_impact_summary(rejected_reasons_by_property),
             },
             "scoring_summary": scoring_summary,
             "top_picks": top_picks,
             "with_trade_offs": trade_offs_parsed,
-            "properties": combined,
         }
     )

@@ -19,7 +19,8 @@ class _DummyClient:
 
 class TestLocalAmenitiesTool(unittest.TestCase):
     def test_rejects_invalid_amenity_type(self) -> None:
-        payload = json.loads(local_amenities.find_nearby_amenities(51.5, -0.1, amenity_type="gym"))
+        # "gym" is now a valid category; use a genuinely unknown type instead
+        payload = json.loads(local_amenities.find_nearby_amenities(51.5, -0.1, amenity_type="nightclub"))
         self.assertIn("error", payload)
         self.assertIn("Invalid amenity_type", payload["error"])
 
@@ -33,7 +34,8 @@ class TestLocalAmenitiesTool(unittest.TestCase):
 
         with mock.patch.object(local_amenities.httpx, "Client", return_value=_DummyClient()):
             with mock.patch.object(local_amenities, "_run_query", side_effect=fake_run_query):
-                payload = json.loads(local_amenities.find_nearby_amenities(51.5, -0.1, amenity_type="all", radius_metres=50))
+                with mock.patch.object(local_amenities.time, "sleep"):
+                    payload = json.loads(local_amenities.find_nearby_amenities(51.5, -0.1, amenity_type="all", radius_metres=50))
 
         # Radius should be clamped to minimum 100.
         self.assertEqual(payload["radius_metres"], 100)
