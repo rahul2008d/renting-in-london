@@ -17,6 +17,21 @@ from tools.rightmove_search import search_london_rentals
 
 load_dotenv()
 
+# Bridge Streamlit Cloud secrets into environment variables
+# (no-op when running locally with .env)
+try:
+    import streamlit as st
+    for key in ("OPENAI_API_KEY", "SERPAPI_KEY", "SERP_API_KEY", "GOOGLE_MAPS_API_KEY"):
+        if not os.environ.get(key):
+            try:
+                val = st.secrets.get(key)
+                if val:
+                    os.environ[key] = str(val)
+            except Exception:
+                pass
+except ImportError:
+    pass
+
 SYSTEM_PROMPT = """You are a London rental property expert. You search 
 live Rightmove listings, score them, and help the user find their 
 perfect home.
