@@ -588,9 +588,17 @@ def _agent_retry_prompt(base_context: str, first_reply: str, issues: list[str]) 
     )
 
 st.set_page_config(
-    page_title="London Rental Agent",
+    page_title="London Rental Agent — AI Property Finder",
     page_icon="🏠",
     layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+st.markdown(
+    '<meta property="og:title" content="London Rental Agent — AI Property Finder">'
+    '<meta property="og:description" content="AI-powered London rental search with live Rightmove listings, scoring, commute times, and neighbourhood insights.">'
+    '<meta property="og:image" content="https://em-content.zobj.net/source/apple/391/house-with-garden_1f3e1.png">',
+    unsafe_allow_html=True,
 )
 
 st.markdown(
