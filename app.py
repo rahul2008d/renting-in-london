@@ -141,11 +141,188 @@ def _format_key_value_labels(reply: str) -> str:
     return "\n".join(out)
 
 
+def _render_property_images(reply: str) -> str:
+    """Convert image bullet lines into compact thumbnail rows."""
+    lines = (reply or "").splitlines()
+    out: list[str] = []
+    for line in lines:
+        img_match = re.match(
+            r"^\s*-\s*(?:`Images?`|Images?)\s*:\s*(.+)\s*$",
+            line,
+        )
+        if img_match:
+            urls_text = img_match.group(1).strip()
+            urls = [u.strip().rstrip(",") for u in re.split(r"[,\s]+", urls_text)
+                    if u.strip().startswith("http")]
+            if urls:
+                imgs_html = "".join(
+                    f'<a href="{url}" target="_blank">'
+                    f'<img src="{url}" style="height:110px; width:auto; '
+                    f'border-radius:6px; object-fit:cover; margin-right:4px;" '
+                    f'onerror="this.style.display=\'none\'">'
+                    f'</a>'
+                    for url in urls[:3]
+                )
+                out.append(
+                    f'<div style="display:flex; flex-wrap:wrap; gap:4px; '
+                    f'margin:6px 0 10px 16px;">{imgs_html}</div>'
+                )
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
 def _finalize_listing_reply(reply: str) -> str:
     formatted = _format_listing_cards_markdown(reply)
     formatted = _add_section_counts(formatted)
     formatted = _format_key_value_labels(formatted)
+    formatted = _render_property_images(formatted)
     return formatted
+
+
+def _markdown_to_basic_html(md: str) -> str:
+    """Convert markdown to basic HTML for the export report."""
+    lines = md.splitlines()
+    html_lines: list[str] = []
+    in_list = False
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Skip lines that are already HTML (from _render_property_images)
+        if re.search(r"<(?:div|img|a)\b", stripped):
+            if in_list:
+                html_lines.append("</ul>")
+                in_list = False
+            html_lines.append(line)
+            continue
+
+        if not stripped:
+            if in_list:
+                html_lines.append("</ul>")
+                in_list = False
+            html_lines.append("<br>")
+            continue
+
+        # Headings
+        if stripped.startswith("### #"):
+            if in_list:
+                html_lines.append("</ul>")
+                in_list = False
+            html_lines.append(f"<h3>{stripped[4:]}</h3>")
+            continue
+        if stripped.startswith("### "):
+            if in_list:
+                html_lines.append("</ul>")
+                in_list = False
+            html_lines.append(f"<h3>{stripped[4:]}</h3>")
+            continue
+        if stripped.startswith("#### "):
+            if in_list:
+                html_lines.append("</ul>")
+                in_list = False
+            html_lines.append(f"<h4>{stripped[5:]}</h4>")
+            continue
+
+        # Horizontal rule
+        if stripped == "---":
+            if in_list:
+                html_lines.append("</ul>")
+                in_list = False
+            html_lines.append("<hr>")
+            continue
+
+        # Images
+        img_match = re.match(r"!\[([^\]]*)\]\(([^)]+)\)", stripped)
+        if img_match:
+            alt, src = img_match.groups()
+            html_lines.append(f'<img src="{src}" alt="{alt}">')
+            continue
+
+        # List items
+        if stripped.startswith("- "):
+            if not in_list:
+                html_lines.append("<ul>")
+                in_list = True
+            content = stripped[2:]
+            content = re.sub(r"`([^`]+)`", r"<code>\1</code>", content)
+            content = re.sub(
+                r"\[([^\]]+)\]\(([^)]+)\)",
+                r'<a href="\2">\1</a>',
+                content,
+            )
+            content = re.sub(
+                r"(https?://\S+)",
+                r'<a href="\1">\1</a>',
+                content,
+            )
+            html_lines.append(f"<li>{content}</li>")
+            continue
+
+        # Regular paragraph
+        if in_list:
+            html_lines.append("</ul>")
+            in_list = False
+        content = re.sub(r"`([^`]+)`", r"<code>\1</code>", stripped)
+        content = re.sub(
+            r"(https?://\S+)",
+            r'<a href="\1">\1</a>',
+            content,
+        )
+        html_lines.append(f"<p>{content}</p>")
+
+    if in_list:
+        html_lines.append("</ul>")
+
+    return "\n".join(html_lines)
+
+
+def _extract_shortlist_html(messages: list[dict]) -> str | None:
+    """Extract property cards from assistant messages and build a standalone HTML report."""
+    assistant_messages = [
+        m["content"] for m in messages if m["role"] == "assistant"
+    ]
+    if not assistant_messages:
+        return None
+
+    full_content = "\n\n---\n\n".join(assistant_messages)
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>London Rental Shortlist</title>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         max-width: 900px; margin: 0 auto; padding: 20px;
+         background: #f8f9fa; color: #1a1a2e; }}
+  h1 {{ color: #16213e; border-bottom: 3px solid #0f3460; padding-bottom: 10px; }}
+  h3 {{ color: #0f3460; margin-top: 30px; border-left: 4px solid #0f3460;
+        padding-left: 10px; }}
+  h4 {{ background: #e2e8f0; padding: 8px 12px; border-radius: 6px;
+        margin-top: 20px; }}
+  ul {{ padding-left: 20px; }}
+  li {{ margin-bottom: 4px; line-height: 1.6; }}
+  a {{ color: #0f3460; }}
+  code {{ background: #e2e8f0; padding: 2px 6px; border-radius: 4px;
+          font-size: 0.9em; }}
+  hr {{ border: none; border-top: 1px solid #cbd5e0; margin: 30px 0; }}
+  .meta {{ color: #718096; font-size: 0.85em; margin-top: 40px;
+           border-top: 1px solid #cbd5e0; padding-top: 10px; }}
+  img {{ max-width: 100%; height: auto; border-radius: 8px; margin: 10px 0; }}
+</style>
+</head>
+<body>
+<h1>London Rental Shortlist</h1>
+<p>Generated from London Rental Agent</p>
+{_markdown_to_basic_html(full_content)}
+<div class="meta">
+  <p>Workplace: 22 Bishopsgate, London EC2N 4BQ</p>
+  <p>Filters: 2+ bed, 2+ bath, furnished, max £2300 pcm, parking preferred</p>
+</div>
+</body>
+</html>"""
+    return html
 
 
 def _add_section_counts(reply: str) -> str:
@@ -619,9 +796,39 @@ if "messages" not in st.session_state:
 if "auto_ran_starter" not in st.session_state:
     st.session_state.auto_ran_starter = False
 
+if "seen_property_ids" not in st.session_state:
+    st.session_state.seen_property_ids = set()
+
 if st.sidebar.button("Clear chat"):
     st.session_state.messages = []
     st.session_state.auto_ran_starter = False
+    st.session_state.seen_property_ids = set()
+
+if st.session_state.messages:
+    shortlist_html = _extract_shortlist_html(st.session_state.messages)
+    if shortlist_html:
+        st.sidebar.download_button(
+            label="Download shortlist",
+            data=shortlist_html,
+            file_name="london_rental_shortlist.html",
+            mime="text/html",
+            use_container_width=True,
+        )
+
+if st.session_state.get("seen_property_ids"):
+    if st.sidebar.button("Check new listings", use_container_width=True):
+        new_listing_prompt = (
+            "Run a new search. After getting results, identify properties "
+            "that are NOT in this list of already-seen property IDs: "
+            f"{', '.join(sorted(st.session_state.seen_property_ids))}. "
+            "Show ONLY properties with days_on_market <= 2 that have "
+            "Rightmove IDs not in the above list. Present them under "
+            "the heading '### New listings since last search'. "
+            "If no new properties are found, say 'No new listings found "
+            "since your last search.' Do not show the full search results "
+            "- only the new ones."
+        )
+        _run_prompt(new_listing_prompt)
 
 agent_error = None
 if "agent" not in st.session_state:
@@ -647,7 +854,7 @@ if st.session_state.get("agent") is None:
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+        st.markdown(msg["content"], unsafe_allow_html=True)
 
 
 def _run_prompt(prompt: str) -> None:
@@ -667,7 +874,7 @@ def _run_prompt(prompt: str) -> None:
     with st.chat_message("assistant"):
         if st.session_state.get("agent") is None:
             reply = "Agent is not available yet. Please complete setup steps in the sidebar."
-            st.markdown(reply)
+            st.markdown(reply, unsafe_allow_html=True)
         else:
             with st.spinner("Searching..."):
                 try:
@@ -708,6 +915,12 @@ def _run_prompt(prompt: str) -> None:
                         # Final presentation pass for readability in chat.
                         reply = _finalize_listing_reply(reply)
 
+                        property_ids = set(re.findall(
+                            r"rightmove\.co\.uk/properties/(\d+)", reply
+                        ))
+                        if property_ids:
+                            st.session_state.seen_property_ids.update(property_ids)
+
                     st.session_state.last_agent_runtime_sec = time.perf_counter() - run_started
                     runtime_badge.markdown(
                         f"<div class='runtime-badge'>Agent time: {st.session_state.last_agent_runtime_sec:.2f}s</div>",
@@ -718,7 +931,7 @@ def _run_prompt(prompt: str) -> None:
                     route_label = "Runtime error"
 
             st.caption(f"Route: {route_label}")
-            st.markdown(reply)
+            st.markdown(reply, unsafe_allow_html=True)
 
     st.session_state.messages.append({"role": "assistant", "content": reply})
 

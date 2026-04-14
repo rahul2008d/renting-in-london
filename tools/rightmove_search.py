@@ -595,6 +595,26 @@ def _extract_amenity_tags(text_blob: str) -> list[str]:
     if any(term in text_blob for term in ("bike storage", "bicycle storage", "cycle storage")):
         tags.append("Bike Storage")
 
+    # Modern kitchen signals
+    if any(term in text_blob for term in (
+        "modern kitchen", "contemporary kitchen", "fitted kitchen",
+        "integrated appliances", "open-plan kitchen", "open plan kitchen",
+        "breakfast bar", "kitchen/diner", "kitchen diner",
+    )):
+        tags.append("Modern Kitchen")
+
+    # Balcony quality distinction — replace generic tag with specific
+    if "juliet balcony" in text_blob and "Balcony/Terrace" in tags:
+        tags.remove("Balcony/Terrace")
+        tags.append("Juliet Balcony (no seating)")
+    elif any(term in text_blob for term in (
+        "large balcony", "spacious balcony", "wrap-around balcony",
+        "wrap around balcony", "private terrace", "roof terrace",
+    )):
+        if "Balcony/Terrace" in tags:
+            tags.remove("Balcony/Terrace")
+            tags.append("Large Balcony/Terrace")
+
     return tags
 
 

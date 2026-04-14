@@ -8,7 +8,10 @@ import httpx
 from strands import tool
 
 
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+OVERPASS_ENDPOINTS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+]
 MAX_RESULTS_PER_CATEGORY = 10
 
 HEADERS = {
@@ -23,11 +26,11 @@ HEADERS = {
 INDIAN_GROCERY_QUERY = """
 [out:json][timeout:25];
 (
-  node["shop"="supermarket"]["name"~"Indian|Asian|Desi|Patel|Spice",i](around:{radius},{lat},{lon});
-  node["shop"="convenience"]["name"~"Indian|Asian|Desi|Patel|Spice",i](around:{radius},{lat},{lon});
-  node["shop"="grocery"]["name"~"Indian|Asian|Desi|Patel|Spice",i](around:{radius},{lat},{lon});
+  node["shop"~"supermarket|convenience|grocery"]["name"~"Indian|Asian|Desi|Patel|Spice|Raj|Punjab|Bangla|Lanka|Halal|World Food|Eastern|Oriental|Exotic|Masala|Namaste|Delhi|Mumbai|Bombay|Karachi|Lahore|Kerala|Tamil|Himalaya",i](around:{radius},{lat},{lon});
+  way["shop"~"supermarket|convenience|grocery"]["name"~"Indian|Asian|Desi|Patel|Spice|Raj|Punjab|Bangla|Lanka|Halal|World Food|Eastern|Oriental|Exotic|Masala|Namaste|Delhi|Mumbai|Bombay|Karachi|Lahore|Kerala|Tamil|Himalaya",i](around:{radius},{lat},{lon});
+  node["shop"~"supermarket|convenience|grocery"]["cuisine"~"indian|asian|south_asian|bangladeshi|pakistani|sri_lankan",i](around:{radius},{lat},{lon});
 );
-out body;
+out center body;
 """.strip()
 
 RESTAURANT_QUERY = """
@@ -54,8 +57,9 @@ SUPERMARKET_QUERY = """
 [out:json][timeout:25];
 (
   node["shop"="supermarket"](around:{radius},{lat},{lon});
+  way["shop"="supermarket"](around:{radius},{lat},{lon});
 );
-out body;
+out center body;
 """.strip()
 
 PARK_QUERY = """
@@ -161,6 +165,15 @@ CATEGORY_GROUPS: dict[str, list[str]] = {
     "food": ["restaurant", "indian_restaurant", "indian_grocery", "fish_shop", "cafe"],
     "lifestyle": ["gym", "cafe", "park"],
     "family": ["school", "park", "gp_surgery", "pharmacy"],
+    "property_check": [
+        "supermarket",
+        "indian_grocery",
+        "indian_restaurant",
+        "park",
+        "gp_surgery",
+        "pharmacy",
+        "transport",
+    ],
     "all": list(QUERY_MAP.keys()),
 }
 
@@ -241,30 +254,33 @@ def _run_query(
 ) -> list[dict]:
     query = query_template.format(radius=radius_metres, lat=latitude, lon=longitude)
 
-    max_retries = 3
-    last_exc: Exception | None = None
-    for attempt in range(max_retries):
-        if attempt > 0:
-            time.sleep(3.0 * attempt)
-        try:
-            response = client.post(OVERPASS_URL, data={"data": query})
-            if response.status_code in (429, 503, 504):
-                last_exc = httpx.HTTPStatusError(
-                    f"Overpass returned {response.status_code}",
-                    request=response.request,
-                    response=response,
-                )
-                continue
-            response.raise_for_status()
-            payload = response.json()
-            elements = payload.get("elements") if isinstance(payload, dict) else None
-            if not isinstance(elements, list):
-                return []
-            return _parse_elements(elements, latitude, longitude)
-        except httpx.HTTPStatusError as exc:
-            last_exc = exc
-        except httpx.RequestError as exc:
-            last_exc = exc
+    for endpoint in OVERPASS_ENDPOINTS:
+        max_retries = 3
+        last_exc: Exception | None = None
+        for attempt in range(max_retries):
+            if attempt > 0:
+                time.sleep(3.0 * attempt)
+            try:
+                response = client.post(endpoint, data={"data": query})
+                if response.status_code in (429, 503, 504):
+                    last_exc = httpx.HTTPStatusError(
+                        f"Overpass returned {response.status_code}",
+                        request=response.request,
+                        response=response,
+                    )
+                    continue
+                response.raise_for_status()
+                payload = response.json()
+                elements = payload.get("elements") if isinstance(payload, dict) else None
+                if not isinstance(elements, list):
+                    return []
+                return _parse_elements(elements, latitude, longitude)
+            except httpx.HTTPStatusError as exc:
+                last_exc = exc
+            except httpx.RequestError as exc:
+                last_exc = exc
+        # All retries on this endpoint failed, try next
+        continue
 
     if last_exc is not None:
         raise last_exc
