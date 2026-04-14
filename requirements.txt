@@ -1,0 +1,6 @@
+strands-agents[openai]
+strands-agents-tools
+httpx
+streamlit
+pydantic
+python-dotenv
